@@ -3,6 +3,7 @@
 - This script should pull Azure Data Factory (v2) pipeline executions for the specified date range and return usage.
 - Consumption costs are calculated pulling current pricing data from the Azure Pricing API: https://azure.microsoft.com/api/v2/pricing/data-factory/calculator
 - Requires the Az module.
+- This will take some time to execute. Make sure you are running this on a host with reliable connectivity. Processing 175,000 activity runs can take roughly 2-3 hours.
 .PARAMETER subscriptionId
 - Specify the subscription ID the data factory is located in.
 .PARAMETER resourceGroup
@@ -12,7 +13,9 @@
 .PARAMETER startDays
 - How many days back from script execution would you like to capture usage information.
 - Defaults to 7 days and if that works, you don't need to specify this parameter.
-- Enhancement needed: add filter for end date
+.PARAMETER endDays
+- Specify number of days back to end filter range.
+- Defaults to 0 days to include runs up to script execution.
 .PARAMETER exportPath
 - Location and filename to drop exported CSV in file system.
 .EXAMPLE
@@ -20,9 +23,11 @@
 -resourceGroup "adf-rg" `
 -factoryName "adf-rg-adf1" `
 -startDays 5 `
+-endDays 1 `
 -exportPath "C:\temp\file.csv"
+- This example will get usage for the ADF, adf-rg-adf1, from 5 days ago to 1 day ago and save the CSV to C:\temp\file.csv.
 .NOTES
-    Version:        0.1
+    Version:        0.2
     Last updated:   09/16/2020
     Modified by:    Zachary Choate
     URL:            https://github.com/KSMC-TS/get-adfusage
@@ -44,6 +49,9 @@ param (
     [Parameter(Mandatory=$false)]
     [int]
     $startDays = 7,
+    [Parameter(Mandatory=$false)]
+    [int]
+    $endDays = 0,
     [Parameter(Mandatory=$true)]
     [string]
     $exportPath
@@ -96,17 +104,21 @@ $providers = "/providers/Microsoft.DataFactory"
 $factories = "/factories/$factoryName"
 $apiVersion = "api-version=2018-06-01"
 
-# Get time in ISO 8601 format
+# Get time in ISO 8601 format and create filter for date range
 $lastUpdatedAfter = Get-Date (Get-Date).AddDays(-($startDays)) -Format "o"
-$lastUpdatedBefore = Get-Date -Format "o"
+$lastUpdatedBefore = Get-Date (Get-Date).AddDays(-($endDays)) -Format "o"
 $filterJson = [ordered]@{
     lastUpdatedAfter = $lastUpdatedAfter
     lastUpdatedBefore = $lastUpdatedBefore
 } | ConvertTo-Json
+
+# Check for valid token
 $token = Get-AccessToken -tokenExpiration $token.Expiration -SubscriptionId $subscriptionId
+# Begin discovery of pipeline runs that fall within date range specified. Return to pipeline details to array for further processing.
 $pipelineRunObj = @()
 $pipelineRuns = Invoke-RestMethod -Uri "$azureEndpoint$subscriptions$resourceGroups$providers$factories/queryPipelineRuns?RunStart=`"$runStartAfter`"&$apiVersion" -Headers $token.Header -Method POST -Body $filterJson -ContentType 'application/json'
 $pipelineRunObj += $pipelineRuns.Value
+# Iterate through pages returned by API - only 100 results returned per request. Do this until there isn't any more results (when the continuationToken isn't passed with the response).
 Do {
     $pipelineFilterJsonObj = $filterJson | ConvertFrom-Json 
     $pipelineFilterJsonObj | Add-Member -MemberType NoteProperty -Name continuationToken -Value $pipelineRuns.continuationToken
@@ -122,16 +134,23 @@ $i = 1
 
 Write-Output "$($pipelineRunObj.count) pipelines were found for the date range specified."
 
+# Go through each pipeline and build an object for each pipeline that has activity run details. Return to array of objects.
+# Ideally need to get this to setup to run in parallel to dramatically reduce runtime of script.
 ForEach($runObj in $pipelineRunObj) {
+    # Build the query for the pipeline runId
     $runId = "/pipelineruns/$($runObj.RunId)"
     
+    # Provide status update
     Write-Output "$i of $($pipelineRunObj.count)..."
     Write-Output "Working on $($runObj.RunId) - $($runObj.PipelineName)"
 
     $activityRunObj = @()
+    # Validate token is still valid and acquire a new one if near expiration
     $token = Get-AccessToken -tokenExpiration $token.Expiration -SubscriptionId $subscriptionId
+    # Get activity runs that the pipeline executed. This is where the actual usage information is located. 
     $activityRuns = Invoke-RestMethod -Uri "$azureEndpoint$subscriptions$resourceGroups$providers$factories$runId/queryactivityruns?$apiVersion" -Headers $token.Header -Method POST -Body $filterJson -ContentType 'application/json'
     $activityRunObj += $activityRuns.Value
+    # Same situation as pipeline run details - have to iterate through each return of 100 results.
     Do {
         $activityFilterJsonObj = $filterJson | ConvertFrom-Json
         $activityFilterJsonObj | Add-Member -MemberType NoteProperty -Name continuationToken -Value $activityRuns.continuationToken
@@ -141,6 +160,7 @@ ForEach($runObj in $pipelineRunObj) {
         $activityRunObj += $($activityRuns.Value)
     } while (-not ([string]::IsNullOrEmpty($activityRuns.continuationToken)))
     
+    # Provide more status updates.
     Write-Output "$($activityRunObj.Output.Count) activity runs were found. Working on organizing usage details.`n`n"
 
     # Get usage details from the Billing Reference details
@@ -166,6 +186,7 @@ ForEach($runObj in $pipelineRunObj) {
 
     }
 
+    # Build an object with the pipeline run details including sums of the activity run usages.
     $runDetails = [PSCustomObject]@{
         RunId = $runObj.RunId
         PipelineName = $runObj.PipelineName
@@ -190,14 +211,17 @@ ForEach($runObj in $pipelineRunObj) {
 
 }
 
-# Get price list
+## Everything below here could probably be cleaned up a bit.
+
+# Get price list, could probably add something here to evaluate pricing on different subscription types but for now just standard pay-as-you-go pricing.
 $priceList = Invoke-RestMethod -uri "https://azure.microsoft.com/api/v2/pricing/data-factory/calculator/?culture=en-us&discount=mosp"
-# Get region of ADF
+# Get region of ADF, price calculator API slug doesn't match up with management API's naming scheme. Central US is selected with us-central rather than centralus.
 $token = Get-AccessToken -tokenExpiration $token.Expiration -SubscriptionId $subscriptionId
 $dataFactoryInfo = Invoke-RestMethod -Uri "$azureEndpoint$subscriptions$resourceGroups$providers$factories`?$apiVersion" -Headers $token.Header -Method Get
 $dataFactoryLocation = $dataFactoryInfo.location
 $region = ($priceList.regions | Where-Object {($_.DisplayName).Replace(" ","") -eq $dataFactoryLocation}).slug
 
+# Build hash table containing pricing info for the specific region and components we need.
 $priceHashTable = @{
     AzureActivityRuns = ($priceList.offers.'orchestration-cloud-v2'.prices."$($region)".value)*.001
     AzureIRDataMovement_DIUHour = $priceList.offers.'datamovement-cloud-v2'.prices."$($region)".value
@@ -225,7 +249,7 @@ $durations = @(
     'ComputeComputedOptimized_coreHour';
     'ComputeMemoryOptimized_coreHour'
 )
-
+# Build objects for total usage and calculated totals.
 $totalDurations = [PSCustomObject]@{
     "Total Usage" = "Total Usage"
 }
@@ -240,7 +264,7 @@ ForEach($duration in $durations) {
     $totalCosts."Total Cost" = $totalCosts."Total Cost" + $totalCost
     $totalCosts | Add-Member -MemberType NoteProperty -Name $duration -Value $totalCost
 }
-
+# Add those totals to the runSummary array. That makes for an easy export to CSV.
 $runSummary += $totalDurations
 $runSummary += $totalCosts
 
