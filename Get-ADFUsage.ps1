@@ -10,7 +10,8 @@
 .PARAMETER factoryName
 - Specify the data factory name.
 .PARAMETER startDays
-- How many days back from script execution would you like to capture usage information
+- How many days back from script execution would you like to capture usage information.
+- Defaults to 7 days and if that works, you don't need to specify this parameter.
 - Enhancement needed: add filter for end date
 .PARAMETER exportPath
 - Location and filename to drop exported CSV in file system.
@@ -31,19 +32,19 @@
 
 [CmdletBinding()]
 param (
-    [Parameter()]
+    [Parameter(Mandatory=$true)]
     [string]
     $subscriptionId,
-    [Parameter()]
+    [Parameter(Mandatory=$true)]
     [string]
     $resourceGroup,
-    [Parameter()]
+    [Parameter(Mandatory=$true)]
     [string]
     $factoryName,
-    [Parameter()]
+    [Parameter(Mandatory=$false)]
     [int]
     $startDays = 7,
-    [Parameter()]
+    [Parameter(Mandatory=$true)]
     [string]
     $exportPath
 )
