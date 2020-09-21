@@ -119,14 +119,16 @@ $pipelineRunObj = @()
 $pipelineRuns = Invoke-RestMethod -Uri "$azureEndpoint$subscriptions$resourceGroups$providers$factories/queryPipelineRuns?RunStart=`"$runStartAfter`"&$apiVersion" -Headers $token.Header -Method POST -Body $filterJson -ContentType 'application/json'
 $pipelineRunObj += $pipelineRuns.Value
 # Iterate through pages returned by API - only 100 results returned per request. Do this until there isn't any more results (when the continuationToken isn't passed with the response).
-Do {
-    $pipelineFilterJsonObj = $filterJson | ConvertFrom-Json 
-    $pipelineFilterJsonObj | Add-Member -MemberType NoteProperty -Name continuationToken -Value $pipelineRuns.continuationToken
-    $pipelineFilterBody = $pipelineFilterJsonObj | ConvertTo-Json
-    $token = Get-AccessToken -tokenExpiration $token.Expiration -SubscriptionId $subscriptionId
-    $pipelineRuns = Invoke-RestMethod -Uri "$azureEndpoint$subscriptions$resourceGroups$providers$factories/queryPipelineRuns?RunStart=`"$runStartAfter`"&$apiVersion" -Headers $token.Header -Method POST -Body $pipelineFilterBody -ContentType 'application/json'
-    $pipelineRunObj += $pipelineRuns.Value
-} while (-not ([string]::IsNullOrEmpty($pipelineRuns.continuationToken)))
+If($pipelineRuns.continuationToken) {
+    Do {
+        $pipelineFilterJsonObj = $filterJson | ConvertFrom-Json 
+        $pipelineFilterJsonObj | Add-Member -MemberType NoteProperty -Name continuationToken -Value $pipelineRuns.continuationToken
+        $pipelineFilterBody = $pipelineFilterJsonObj | ConvertTo-Json
+        $token = Get-AccessToken -tokenExpiration $token.Expiration -SubscriptionId $subscriptionId
+        $pipelineRuns = Invoke-RestMethod -Uri "$azureEndpoint$subscriptions$resourceGroups$providers$factories/queryPipelineRuns?RunStart=`"$runStartAfter`"&$apiVersion" -Headers $token.Header -Method POST -Body $pipelineFilterBody -ContentType 'application/json'
+        $pipelineRunObj += $pipelineRuns.Value
+    } while (-not ([string]::IsNullOrEmpty($pipelineRuns.continuationToken)))
+}
 
 $runSummary = @()
 
